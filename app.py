@@ -1,5 +1,7 @@
 import os
 import tempfile
+import base64
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -7,9 +9,23 @@ from openai import OpenAI
 # Cargar variables de entorno desde el archivo .env
 load_dotenv()
 
-# Inicializar cliente de OpenAI
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Detectar automáticamente si se usa Gemini o OpenAI
+USE_GEMINI = bool(GEMINI_API_KEY and (not OPENAI_API_KEY or OPENAI_API_KEY.startswith("AQ.") or "tu_api_key" in OPENAI_API_KEY))
+
+if USE_GEMINI:
+    active_key = GEMINI_API_KEY or OPENAI_API_KEY
+    client = OpenAI(
+        api_key=active_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
+    MODELO_DEFAULT = "gemini-3.6-flash"
+else:
+    active_key = OPENAI_API_KEY
+    client = OpenAI(api_key=active_key)
+    MODELO_DEFAULT = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Configuración de la interfaz en Streamlit
 st.set_page_config(
@@ -42,18 +58,15 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 def consultar_chatbot(pregunta):
-    """Consulta al modelo de OpenAI manteniendo el historial de conversación."""
+    """Consulta al modelo manteniendo el historial de conversación."""
     historial = [
         {"role": "system", "content": SYSTEM_PROMPT}
     ]
     historial.extend(st.session_state.messages)
     historial.append({"role": "user", "content": pregunta})
 
-    # Si en el entorno o .env se define un modelo (ej. gpt-4o-mini o gpt-5.6-luna), se usa ese
-    modelo = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    
     respuesta = client.chat.completions.create(
-        model=modelo,
+        model=MODELO_DEFAULT,
         messages=historial
     )
     return respuesta.choices[0].message.content
@@ -62,14 +75,12 @@ def consultar_chatbot(pregunta):
 pregunta = st.chat_input("Escribe una pregunta sobre comida peruana")
 
 if pregunta:
-    # Agregar y mostrar mensaje del usuario
     st.session_state.messages.append(
         {"role": "user", "content": pregunta}
     )
     with st.chat_message("user"):
         st.markdown(pregunta)
         
-    # Obtener y mostrar respuesta del asistente
     with st.chat_message("assistant"):
         with st.spinner("Generando respuesta..."):
             respuesta = consultar_chatbot(pregunta)
@@ -91,7 +102,7 @@ audio = st.file_uploader(
 if audio is not None:
     st.audio(audio)
     if st.button("Transcribir y consultar"):
-        extension = audio.name.split(".")[-1]
+        extension = audio.name.split(".")[-1].lower()
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=f".{extension}"
@@ -100,14 +111,32 @@ if audio is not None:
             ruta_temp = archivo_temp.name
 
         try:
-            # Transcripción con Whisper
-            with open(ruta_temp, "rb") as archivo_audio:
-                transcripcion = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=archivo_audio,
-                    language="es"
-                )
-            texto = transcripcion.text
+            with st.spinner("Transcribiendo audio..."):
+                if USE_GEMINI:
+                    with open(ruta_temp, "rb") as f:
+                        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+                    
+                    mime = "audio/wav" if extension == "wav" else ("audio/mp4" if extension == "m4a" else "audio/mp3")
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={active_key}"
+                    payload = {
+                        "contents": [{
+                            "parts": [
+                                {"text": "Transcribe exactamente lo que se dice en este audio en español. Devuelve únicamente el texto transcrito sin comillas ni explicaciones."},
+                                {"inlineData": {"mimeType": mime, "data": audio_b64}}
+                            ]
+                        }]
+                    }
+                    r = requests.post(url, json=payload)
+                    texto = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                else:
+                    with open(ruta_temp, "rb") as archivo_audio:
+                        transcripcion = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=archivo_audio,
+                            language="es"
+                        )
+                    texto = transcripcion.text
+
             st.success("Audio transcrito correctamente.")
             st.write("**Texto transcrito:**")
             st.write(texto)
