@@ -21,7 +21,7 @@ if USE_GEMINI:
         api_key=active_key,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
     )
-    MODELO_DEFAULT = "gemini-3.6-flash"
+    MODELO_DEFAULT = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 else:
     active_key = OPENAI_API_KEY
     client = OpenAI(api_key=active_key)
@@ -116,8 +116,15 @@ if audio is not None:
                     with open(ruta_temp, "rb") as f:
                         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
                     
-                    mime = "audio/wav" if extension == "wav" else ("audio/mp4" if extension == "m4a" else "audio/mp3")
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={active_key}"
+                    mime_types = {
+                        "wav": "audio/wav",
+                        "m4a": "audio/mp4",
+                        "webm": "audio/webm",
+                        "mp3": "audio/mpeg",
+                    }
+                    mime = mime_types[extension]
+                    modelo_gemini = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_gemini}:generateContent?key={active_key}"
                     payload = {
                         "contents": [{
                             "parts": [
@@ -126,8 +133,14 @@ if audio is not None:
                             ]
                         }]
                     }
-                    r = requests.post(url, json=payload)
-                    texto = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    r = requests.post(url, json=payload, timeout=60)
+                    resultado = r.json()
+                    if not r.ok or "candidates" not in resultado:
+                        mensaje_error = resultado.get("error", {}).get("message", r.text)
+                        raise RuntimeError(
+                            f"Gemini devolvió un error ({r.status_code}): {mensaje_error}"
+                        )
+                    texto = resultado["candidates"][0]["content"]["parts"][0]["text"].strip()
                 else:
                     with open(ruta_temp, "rb") as archivo_audio:
                         transcripcion = client.audio.transcriptions.create(
